@@ -36,6 +36,24 @@ class RadiusPacketCode
     /** Code 13 - Client status inquiry (experimental) */
     const STATUS_CLIENT         = 13;
 
+    /** Code 40 - Disconnect-Request (RFC 5176 / CoA) */
+    const DISCONNECT_REQUEST    = 40;
+
+    /** Code 41 - Disconnect-ACK */
+    const DISCONNECT_ACK        = 41;
+
+    /** Code 42 - Disconnect-NAK */
+    const DISCONNECT_NAK        = 42;
+
+    /** Code 43 - CoA-Request (RFC 5176) */
+    const COA_REQUEST           = 43;
+
+    /** Code 44 - CoA-ACK */
+    const COA_ACK               = 44;
+
+    /** Code 45 - CoA-NAK */
+    const COA_NAK               = 45;
+
     /** Code 255 - Reserved */
     const RESERVED              = 255;
 
@@ -51,6 +69,12 @@ class RadiusPacketCode
         self::ACCESS_CHALLENGE      => 'Access-Challenge',
         self::STATUS_SERVER         => 'Status-Server (experimental)',
         self::STATUS_CLIENT         => 'Status-Client (experimental)',
+        self::DISCONNECT_REQUEST    => 'Disconnect-Request',
+        self::DISCONNECT_ACK        => 'Disconnect-ACK',
+        self::DISCONNECT_NAK        => 'Disconnect-NAK',
+        self::COA_REQUEST           => 'CoA-Request',
+        self::COA_ACK               => 'CoA-ACK',
+        self::COA_NAK               => 'CoA-NAK',
         self::RESERVED              => 'Reserved',
     ];
 

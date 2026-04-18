@@ -55,17 +55,38 @@ class RadiusCore
 
     var $radiusPacket   =   [];
 
-    var $radiusIp       =   '0.0.0.0';
-    var $radiusAuthPort =   1812;
-    var $radiusAcctPort =   1813;
-    var $radiusSecret   =   'mendify@2023';
+    // Config-driven properties
+    private array  $config;
+    private string $radiusIp;
+    private int    $radiusAuthPort;
+    private int    $radiusAcctPort;
+    private string $radiusSecret;
+    private int    $coaHttpPort;
+    private string $coaApiKey;
+    private string $dictionaryDir;
+    private string $apiUrl;
+    private string $acctUrl;
+    private int    $apiTimeout;
 
-    public function __construct($radiusIp = '0.0.0.0', $authPort = 1812, $acctPort = 1813, $secret = 'mendify@2023')
+    public function __construct(array $config = [])
     {
-        $this->radiusIp         =   $radiusIp;
-        $this->radiusAuthPort   =   $authPort;
-        $this->radiusAcctPort   =   $acctPort;
-        $this->radiusSecret     =   $secret;
+        $this->config = $config;
+
+        // Radius settings from config
+        $r = $config['radius'] ?? [];
+        $this->radiusIp       = $r['ip']            ?? '0.0.0.0';
+        $this->radiusAuthPort = $r['auth_port']      ?? 1812;
+        $this->radiusAcctPort = $r['acct_port']      ?? 1813;
+        $this->radiusSecret   = $r['secret']         ?? 'mysecret';
+        $this->coaHttpPort    = $r['coa_http_port']  ?? 3799;
+        $this->coaApiKey      = $r['coa_api_key']    ?? '';
+        $this->dictionaryDir  = $r['dictionary_dir'] ?? 'dictionary';
+
+        // API settings
+        $a = $config['api'] ?? [];
+        $this->apiUrl    = $a['url']      ?? '';
+        $this->acctUrl   = $a['acct_url'] ?? '';
+        $this->apiTimeout = $a['timeout'] ?? 3;
 
         //Radius Packet Codes (from RadiusPacketCode constants)
         $this->radiusPacket = RadiusPacketCode::NAMES;
@@ -406,10 +427,10 @@ class RadiusCore
     }
 
     public function load_dictionary($file = "dictionary") {
-        $dictionaryPath = "./dictionary/".$file;
+        $dictionaryPath = "./" . $this->dictionaryDir . "/" . $file;
         if (file_exists($dictionaryPath)) {
             $this->log("Load Dictionary " . $file);
-            $dict = file_get_contents("./dictionary/" . $file);
+            $dict = file_get_contents($dictionaryPath);
             $dict_lines = explode("\n", $dict);
             $current_vendor = NULL;
             $current_vendorId = 0;
@@ -618,14 +639,109 @@ class RadiusCore
 
         // $server->start();
 
-        $server = new SocketServer();
+        $server = new SocketServer($this->config);
 
         $server->addListener($this->radiusIp, $this->radiusAuthPort);
         $server->addListener($this->radiusIp, $this->radiusAcctPort);
 
+        // CoA HTTP listener
+        if ($this->coaHttpPort > 0) {
+            $server->addCoaListener($this->radiusIp, $this->coaHttpPort);
+            $server->on('CoaRequest', array($this, 'handleCoaRequest'));
+        }
+
         $server->on('Packet', array($this, 'processRadiusPacket'));
 
         $server->run();
+    }
+
+    /**
+     * Handle CoA HTTP request (POST /coa)
+     * 
+     * JSON body: { "api_key": "...", "nas_ip": "...", "secret": "...", "coa_port": 3799, "attributes": { ... } }
+     * Response: { "status": "success|error", "code": 44|45, "message": "..." }
+     */
+    public function handleCoaRequest(SocketServer $server, $clientSocket, string $body, array $headers): void
+    {
+        // Validate API key (check header or JSON body)
+        $headerApiKey = $headers['x-api-key'] ?? '';
+        $json = json_decode($body, true);
+
+        if (!is_array($json)) {
+            $server->sendHttpResponse($clientSocket, 400, 'Bad Request',
+                json_encode(['status' => 'error', 'message' => 'invalid JSON body']));
+            socket_close($clientSocket);
+            return;
+        }
+
+        $bodyApiKey = $json['api_key'] ?? '';
+        $apiKey = $headerApiKey ?: $bodyApiKey;
+
+        if ($this->coaApiKey !== '' && $apiKey !== $this->coaApiKey) {
+            $server->sendHttpResponse($clientSocket, 401, 'Unauthorized',
+                json_encode(['status' => 'error', 'message' => 'invalid api_key']));
+            socket_close($clientSocket);
+            return;
+        }
+
+        $nasIp    = $json['nas_ip']     ?? '';
+        $nasSecret = $json['secret']    ?? $this->radiusSecret;
+        $coaPort  = (int)($json['coa_port'] ?? 3799);
+        $attrs    = $json['attributes'] ?? [];
+
+        if (empty($nasIp)) {
+            $server->sendHttpResponse($clientSocket, 400, 'Bad Request',
+                json_encode(['status' => 'error', 'message' => 'nas_ip required']));
+            socket_close($clientSocket);
+            return;
+        }
+
+        // Build CoA-Request packet (code 43)
+        $identifier = rand(0, 255);
+        $authenticator = random_bytes(16);
+        $attrPacked = $this->readyPacket($attrs);
+        $coaPacket = $this->encodePackets($nasSecret, RadiusPacketCode::COA_REQUEST, $identifier, $authenticator, $attrPacked);
+
+        // Send CoA UDP to NAS
+        $sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        if (!$sock) {
+            $server->sendHttpResponse($clientSocket, 500, 'Internal Server Error',
+                json_encode(['status' => 'error', 'message' => 'failed to create UDP socket']));
+            socket_close($clientSocket);
+            return;
+        }
+
+        socket_set_option($sock, SOL_SOCKET, SO_RCVTIMEO, ['sec' => $this->apiTimeout, 'usec' => 0]);
+        socket_sendto($sock, $coaPacket, strlen($coaPacket), 0, $nasIp, $coaPort);
+
+        // Wait for CoA response
+        $response = '';
+        $fromIp = '';
+        $fromPort = 0;
+        $result = @socket_recvfrom($sock, $response, 4096, 0, $fromIp, $fromPort);
+        socket_close($sock);
+
+        if ($result === false || strlen($response) < 20) {
+            $server->sendHttpResponse($clientSocket, 504, 'Gateway Timeout',
+                json_encode(['status' => 'error', 'message' => 'no response from NAS', 'nas_ip' => $nasIp]));
+            socket_close($clientSocket);
+            return;
+        }
+
+        // Parse response code
+        $respCode = ord($response[0]);
+        $respName = RadiusPacketCode::getName($respCode);
+
+        $status = ($respCode === RadiusPacketCode::COA_ACK || $respCode === RadiusPacketCode::DISCONNECT_ACK) ? 'success' : 'error';
+
+        $server->sendHttpResponse($clientSocket, 200, 'OK',
+            json_encode([
+                'status'  => $status,
+                'code'    => $respCode,
+                'message' => $respName,
+                'nas_ip'  => $nasIp,
+            ]));
+        socket_close($clientSocket);
     }
 
 }
