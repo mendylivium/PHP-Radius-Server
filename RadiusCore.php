@@ -7,6 +7,7 @@
  */
 
 require("SocketServer.php");
+require_once("RadiusPacketCode.php");
 
 class RadiusCore 
 {
@@ -66,16 +67,8 @@ class RadiusCore
         $this->radiusAcctPort   =   $acctPort;
         $this->radiusSecret     =   $secret;
 
-        //Radius Packet Codes
-        $this->radiusPacket[1]  = 'Access-Request';
-        $this->radiusPacket[2]  = 'Access-Accept';
-        $this->radiusPacket[3]  = 'Access-Reject';
-        $this->radiusPacket[4]  = 'Accounting-Request';
-        $this->radiusPacket[5]  = 'Accounting-Response';
-        $this->radiusPacket[11] = 'Access-Challenge';
-        $this->radiusPacket[12] = 'Status-Server (experimental)';
-        $this->radiusPacket[13] = 'Status-Client (experimental)';
-        $this->radiusPacket[255] = 'Reserved';
+        //Radius Packet Codes (from RadiusPacketCode constants)
+        $this->radiusPacket = RadiusPacketCode::NAMES;
 
 
 
@@ -550,15 +543,15 @@ class RadiusCore
             'Reply-Message' => 'No Action Given'
         ];
 
-        $accessResponse = 3;
+        $accessResponse = RadiusPacketCode::ACCESS_REJECT;
 
-        $accountingRespone = 5;
+        $accountingRespone = RadiusPacketCode::ACCOUNTING_RESPONSE;
 
         $dynamicSecret = null;
 
         switch($radiusData['code']) {
 
-            case 1:
+            case RadiusPacketCode::ACCESS_REQUEST:
                 if (is_callable($this->requestAccess)) {
                     $this->log("Access-Request Recieved");
                     [$accessResponse , $radiusResponse] = call_user_func($this->requestAccess, $clientAttributes);                    
@@ -570,7 +563,7 @@ class RadiusCore
                     $this->encodePackets($dynamicSecret ?? $this->radiusSecret, $accessResponse, $radiusData['identifier'], $radiusData['authenticator'], $this->readyPacket($radiusResponse)), $clientInfo['server_socket']
                 );
                 break;
-            case 4:
+            case RadiusPacketCode::ACCOUNTING_REQUEST:
                 if(isset($clientAttributes['Acct-Status-Type'])) {
                     switch($clientAttributes['Acct-Status-Type']) {
                         case "Start":
